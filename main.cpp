@@ -25,6 +25,7 @@ struct TcpPacket final
     EthHdr eth_;
     IpHdr ip_;
     TcpHdr tcp_;
+    char tcpData[256];
 };
 struct Packet final
 {
@@ -85,10 +86,10 @@ void forRST(pcap_t *handle, TcpPacket *packet, pcap_pkthdr *header, Mac myMac){
     memcpy(orgpkt, packet, header->caplen);
     int dataSize = (orgpkt->ip_.len()) - (orgpkt->ip_.hl()<<2) - (orgpkt->tcp_.off()<<2);
     orgpkt->eth_.smac_ = myMac;
-    orgpkt->ip_.len_ = htons(orgpkt->ip_.hl()<<2 + orgpkt->tcp_.off()<<2);
+    orgpkt->ip_.len_ = htons(sizeof(IpHdr) + sizeof(TcpHdr));
     orgpkt->ip_.sum_ = htons(IpHdr::calcChecksum(&(orgpkt->ip_)));
     orgpkt->tcp_.seq_ = htonl(orgpkt->tcp_.seq() + dataSize);
-    orgpkt->tcp_.off_rsvd_ = (sizeof(TcpHdr)>>2)<<4;
+    orgpkt->tcp_.off_rsvd_ = (sizeof(TcpHdr)/4)<<4;
     orgpkt->tcp_.flags_ = 0x14;
     orgpkt->tcp_.sum_ = htons(TcpHdr::calcChecksum(&(orgpkt->ip_), &(orgpkt->tcp_)));
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char *>(orgpkt), header->caplen);
@@ -107,16 +108,17 @@ void backFIN(pcap_t *handle, TcpPacket *packet, pcap_pkthdr *header, Mac myMac){
     int dataSize = (orgpkt->ip_.len()) - (orgpkt->ip_.hl()<<2) - (orgpkt->tcp_.off()<<2);
     orgpkt->eth_.smac_ = myMac;
     orgpkt->eth_.dmac_ = packet->eth_.smac_;
-    orgpkt->ip_.len_ = htons(orgpkt->ip_.hl()<<2 + orgpkt->tcp_.off()<<2 + strlen(reDirect));
+    orgpkt->ip_.len_ = htons(sizeof(IpHdr) + sizeof(TcpHdr) + strlen(reDirect));
     orgpkt->ip_.sum_ = htons(IpHdr::calcChecksum(&(orgpkt->ip_)));
     orgpkt->ip_.ttl_ = 128;
     orgpkt->ip_.sip_ = packet->ip_.dip_;
     orgpkt->ip_.dip_ = packet->ip_.sip_;
+
     orgpkt->tcp_.sport_ = packet->tcp_.dport_;
     orgpkt->tcp_.dport_ = packet->tcp_.sport_;
     orgpkt->tcp_.seq_ = packet->tcp_.ack_;
     orgpkt->tcp_.ack_ = htonl(orgpkt->tcp_.seq() + dataSize);
-    orgpkt->tcp_.off_rsvd_ = (sizeof(TcpHdr)>>2)<<4;
+    orgpkt->tcp_.off_rsvd_ = (sizeof(TcpHdr)/4)<<4;
     orgpkt->tcp_.flags_ = 0x11;
     orgpkt->tcp_.sum_ = htons(TcpHdr::calcChecksum(&(orgpkt->ip_), &(orgpkt->tcp_)));
     int res = pcap_sendpacket(handle, reinterpret_cast<const u_char *>(orgpkt), header->caplen + strlen(reDirect));
@@ -180,21 +182,19 @@ int main(int argc, char* argv[]){
         }
         TcpPacket* pkt = (TcpPacket*)packet;
         if(pkt->ip_.p_==TCP){
-            struct TcpHdr* tcp = (TcpHdr*)((char*)(&pkt->ip_) + (pkt->ip_.v_hl_<<2));
-            char* data = (char*)tcp + (tcp->off()<<2);
-            int offset = data - (char*)packet;
-            int tcp_len = header->caplen - offset;
-            if(tcp_len>0){
-                if((strnstr(data,pattern,tcp_len)) != NULL){
-                    if((tcp->sport() == HTTP) || (tcp->dport() == HTTP)){
+            int len = pkt->ip_.len();
+            int ip_len = pkt->ip_.hl()<<2;
+            int tcp_len = pkt->tcp_.off()<<2;
+            int pay_len = len - ip_len - tcp_len;
+            if(pay_len>0){
+                if((strnstr(pkt->tcpData,pattern,pay_len))!= NULL){
+                    if((pkt->tcp_.sport() == HTTP) || (pkt->tcp_.dport() == HTTP)){
                         forRST(handle,pkt,header,myMac);
                         backFIN(handle,pkt,header,myMac);
-                        printf("Block success\n");
                     }
-                    else if((tcp->sport() == HTTPS) || (tcp->dport() == HTTPS)){
+                    else if((pkt->tcp_.sport() == HTTPS) || (pkt->tcp_.dport() == HTTPS)){
                         forRST(handle,pkt,header,myMac);
                         backRST(handle,pkt,header,myMac);
-                        printf("Block success\n");
                     }
                 }
             }
